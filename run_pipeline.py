@@ -23,7 +23,7 @@ def build_configs():
 
     run_cfg = PipelineRunConfig(
         run_name="offroad_planning",
-        # keywords=["planning|semantic segmentation|traversability"],
+        # 下面列表中的关键词是或的关系。
         keywords=["planning", "segmentation", "traversability"],     
         targets=targets,
         start_year=2022,
