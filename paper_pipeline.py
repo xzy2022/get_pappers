@@ -42,6 +42,7 @@ class PipelineRunConfig:
     abstract_dir_name: str = "abstracts"
     dblp_limit: int = 1000
     abstract_sleep: float = 1.2
+    resume: bool = True  # 允许复用已有中间结果
 
 
 @dataclass
@@ -116,8 +117,15 @@ def fetch_dblp_once(stream_key: str, keyword: str, start_year: int, limit: int) 
 
 def fetch_from_dblp(cfg: PipelineRunConfig) -> Tuple[pd.DataFrame, str]:
     ensure_dir(cfg.output_dir)
-    all_rows = []
+    search_path = os.path.join(cfg.output_dir, f"{cfg.run_name}_search.xlsx")
 
+    # 若启用恢复且搜索结果已存在，直接复用
+    if cfg.resume and os.path.exists(search_path):
+        df_cached = pd.read_excel(search_path)
+        print(f"[Step1] 复用已有搜索结果: {search_path} (共 {len(df_cached)} 条)")
+        return df_cached, search_path
+
+    all_rows = []
     for keyword in cfg.keywords:
         for target in cfg.targets:
             rows = fetch_dblp_once(target.stream_key, keyword, cfg.start_year, cfg.dblp_limit)
@@ -131,8 +139,6 @@ def fetch_from_dblp(cfg: PipelineRunConfig) -> Tuple[pd.DataFrame, str]:
     df = pd.DataFrame(all_rows)
     df = df.sort_values(by=["Year"], ascending=False)
     df = df.drop_duplicates(subset=["DOI", "Title"], keep="first")
-
-    search_path = os.path.join(cfg.output_dir, f"{cfg.run_name}_search.xlsx")
     df.to_excel(search_path, index=False)
     print(f"[Step1] 共 {len(df)} 条记录写入 {search_path}")
     return df, search_path
@@ -290,20 +296,75 @@ def _build_prompt(batch_df: pd.DataFrame, abstract_dir: str) -> Tuple[str, List[
     return user_prompt, indices
 
 
+def _load_checkpoint(path: str) -> Dict[int, Dict[str, str]]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {int(k): v for k, v in data.items()}
+    except Exception:
+        return {}
+
+
+def _save_checkpoint(path: str, data: Dict[int, Dict[str, str]]):
+    ensure_dir(os.path.dirname(path) or ".")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({str(k): v for k, v in data.items()}, f, ensure_ascii=False, indent=2)
+
+
+def _load_existing_results_from_output(path: str) -> Dict[int, Dict[str, str]]:
+    if not os.path.exists(path):
+        return {}
+    try:
+        df_existing = pd.read_excel(path)
+        if "AI_Score" not in df_existing.columns or "AI_Reason" not in df_existing.columns:
+            return {}
+        results = {}
+        for _, row in df_existing.iterrows():
+            row_id = int(row["RowId"]) if "RowId" in df_existing.columns else _
+            if pd.notna(row.get("AI_Score")):
+                results[row_id] = {"score": row.get("AI_Score", 0), "reason": row.get("AI_Reason", "")}
+        return results
+    except Exception:
+        return {}
+
+
 def run_ai_scoring(df: pd.DataFrame, abstract_dir: str, ai_cfg: AIConfig, output_path: str) -> pd.DataFrame:
     client = _load_ai_client(ai_cfg)
     df = df.copy()
 
-    chunks = [df.iloc[i : i + ai_cfg.batch_size] for i in range(0, len(df), ai_cfg.batch_size)]
-    results_map: Dict[int, Dict[str, str]] = {}
+    # 为每行创建稳定的行标识，便于恢复
+    if "RowId" not in df.columns:
+        df["RowId"] = df.index
 
-    print(f"[Step3] AI 评审，共 {len(chunks)} 个批次，并发数 {ai_cfg.max_workers}")
+    # 准备已有结果（输出文件 + 检查点）
+    checkpoint_path = output_path + ".ckpt.json"
+    results_map: Dict[int, Dict[str, str]] = {}
+    results_map.update(_load_existing_results_from_output(output_path))
+    results_map.update(_load_checkpoint(checkpoint_path))
+
+    pending_df = df[df["RowId"].map(lambda x: x not in results_map)]
+
+    if len(pending_df) == 0:
+        print(f"[Step3] 检测到已有评分，跳过 API 调用，直接写入 {output_path}")
+        df["AI_Score"] = df["RowId"].map(lambda x: results_map.get(x, {}).get("score", 0))
+        df["AI_Reason"] = df["RowId"].map(lambda x: results_map.get(x, {}).get("reason", "处理遗漏"))
+        df = df.sort_values(by="AI_Score", ascending=False)
+        df.to_excel(output_path, index=False)
+        return df
+
+    chunks = [pending_df.iloc[i : i + ai_cfg.batch_size] for i in range(0, len(pending_df), ai_cfg.batch_size)]
+
+    print(f"[Step3] AI 评审，待处理 {len(pending_df)} 条，共 {len(chunks)} 个批次，并发数 {ai_cfg.max_workers}")
     with concurrent.futures.ThreadPoolExecutor(max_workers=ai_cfg.max_workers) as executor:
         future_to_indices = {}
         for chunk in chunks:
             prompt, indices = _build_prompt(chunk, abstract_dir)
             future = executor.submit(_call_ai, client, ai_cfg, prompt)
-            future_to_indices[future] = indices
+            # 将 RowId 对齐
+            row_ids = [int(chunk.iloc[j]["RowId"]) for j in range(len(indices))]
+            future_to_indices[future] = row_ids
 
         for future in tqdm(concurrent.futures.as_completed(future_to_indices), total=len(future_to_indices), desc="AI 评审进度"):
             indices = future_to_indices[future]
@@ -313,20 +374,23 @@ def run_ai_scoring(df: pd.DataFrame, abstract_dir: str, ai_cfg: AIConfig, output
                 print(f"[AI] 批次异常: {exc}")
                 ai_results = None
 
-            for j, idx in enumerate(indices):
+            for j, row_id in enumerate(indices):
                 if ai_results and isinstance(ai_results, list) and j < len(ai_results):
-                    results_map[idx] = {
+                    results_map[row_id] = {
                         "score": ai_results[j].get("score", 0),
                         "reason": ai_results[j].get("reason", "无理由"),
                     }
                 else:
-                    results_map[idx] = {"score": 0, "reason": "AI返回不足或失败"}
+                    results_map[row_id] = {"score": 0, "reason": "AI返回不足或失败"}
 
-    df["AI_Score"] = df.index.map(lambda x: results_map.get(x, {}).get("score", 0))
-    df["AI_Reason"] = df.index.map(lambda x: results_map.get(x, {}).get("reason", "处理遗漏"))
+            # 每处理一批就落盘检查点，支持断点续跑
+            _save_checkpoint(checkpoint_path, results_map)
+
+    df["AI_Score"] = df["RowId"].map(lambda x: results_map.get(x, {}).get("score", 0))
+    df["AI_Reason"] = df["RowId"].map(lambda x: results_map.get(x, {}).get("reason", "处理遗漏"))
     df = df.sort_values(by="AI_Score", ascending=False)
     df.to_excel(output_path, index=False)
-    print(f"[Step3] 结果写入 {output_path}")
+    print(f"[Step3] 结果写入 {output_path} (检查点保存在 {checkpoint_path})")
     return df
 
 
