@@ -3,22 +3,26 @@ import json
 import pandas as pd
 import time
 from tqdm import tqdm
-from google import genai
-from google.genai import types
-from dotenv import load_dotenv  # 新增：引入加载库
+from openai import OpenAI  # --- 修改：引入 OpenAI 库替代 google.genai ---
+from dotenv import load_dotenv
 
 # --- 加载隐藏的 API Key ---
-load_dotenv()  # 自动寻找项目根目录下的 .env 文件并加载环境变量
-api_key = os.getenv("GOOGLE_API_KEY")
+load_dotenv()
+# --- 修改：获取 DeepSeek 的 API Key ---
+api_key = os.getenv("DEEPSEEK_API_KEY") 
 
 if not api_key:
-    raise ValueError("错误：未在 .env 文件或环境变量中找到 GOOGLE_API_KEY")
-
+    raise ValueError("错误：未在 .env 文件或环境变量中找到 DEEPSEEK_API_KEY")
 
 # --- 配置区 ---
-# 请确保已设置环境变量 GOOGLE_API_KEY
-client = genai.Client(api_key=api_key)
-MODEL_ID = "gemini-3-flash-preview"  # 使用当前的 Flash 模型，速度快且成本低
+# --- 修改：初始化 OpenAI 客户端并指向 DeepSeek Base URL ---
+client = OpenAI(
+    api_key=api_key, 
+    base_url="https://api.deepseek.com"
+)
+MODEL_ID = "deepseek-chat" # --- 修改：使用 deepseek-chat 模型 ---
+# deepseek-reasoner
+# deepseek-chat
 
 INPUT_INDEX_FILE = "output/IJRR_Indexed_Main.xlsx"
 OUTPUT_ANALYSIS_FILE = "output/Literature_Review_Results.xlsx"
@@ -53,30 +57,42 @@ def get_abstract_content(link):
     return "找不到摘要文件。"
 
 def analyze_batch(batch_data):
-    """调用 Gemini 分析 5 篇论文"""
+    """调用 DeepSeek 分析 5 篇论文"""
     user_prompt = "请分析以下 5 篇文献的摘要，并返回 JSON 数组：\n\n"
     for i, item in enumerate(batch_data):
         user_prompt += f"[文献 {i+1}]\n标题: {item['Title']}\n摘要: {item['Abstract']}\n\n"
 
-    try:
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.1, # 降低随机性，保证格式稳定
-                response_mime_type="application/json" # 强制输出 JSON
-            ),
-        )
-        
-        # 解析返回结果
-        raw_text = response.text.strip()
-        # 移除可能存在的 Markdown 代码块标记
-        cleaned_text = raw_text.replace("```json", "").replace("```", "").strip()
-        return json.loads(cleaned_text)
-    except Exception as e:
-        print(f"AI 分析出错: {e}")
-        return [{"score": 0, "reason": "分析失败"}] * len(batch_data)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # --- 修改：使用 OpenAI 兼容格式调用 DeepSeek ---
+            response = client.chat.completions.create(
+                model=MODEL_ID,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1, # 保持低温度以稳定格式
+                stream=False
+            )
+            
+            # --- 修改：解析 OpenAI 格式的返回内容 ---
+            raw_text = response.choices[0].message.content.strip()
+            
+            # 清理 Markdown 标记 (DeepSeek 经常会加 ```json)
+            cleaned_text = raw_text.replace("```json", "").replace("```", "").strip()
+            return json.loads(cleaned_text)
+            
+        except Exception as e:
+            # 检查是否为频率限制错误
+            if "429" in str(e) or "rate limit" in str(e).lower():
+                if attempt < max_retries - 1:
+                    print(f"\n[重试控制] 触发频率限制，等待 10 秒后进行第 {attempt + 1} 次重试...")
+                    time.sleep(10) # DeepSeek 恢复较快，通常不需要太久
+                    continue
+            
+            print(f"AI 分析出错: {e}")
+            return [{"score": 0, "reason": "分析失败"}] * len(batch_data)
 
 def run_analysis():
     # 1. 读取索引表
@@ -101,7 +117,7 @@ def run_analysis():
         # 调用 AI
         results = analyze_batch(batch_list)
         
-        # 提取结果（对齐长度，防止 AI 返回缺失）
+        # 提取结果
         for j in range(len(batch_list)):
             if j < len(results):
                 all_scores.append(results[j].get('score', 0))
@@ -110,14 +126,13 @@ def run_analysis():
                 all_scores.append(0)
                 all_reasons.append("AI 未能返回结果")
         
-        # 稍微停顿，避免触发 API 频率限制
-        time.sleep(1)
+        # --- 修改：DeepSeek 速率限制较宽松，但仍保留少量缓冲 ---
+        time.sleep(1) 
 
     # 3. 将结果合并并保存
     df['AI_Score'] = all_scores
     df['AI_Reason'] = all_reasons
     
-    # 按照分数降序排列，方便直接看高分论文
     df = df.sort_values(by='AI_Score', ascending=False)
     
     df.to_excel(OUTPUT_ANALYSIS_FILE, index=False)
