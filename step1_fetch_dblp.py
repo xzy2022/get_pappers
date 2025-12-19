@@ -64,9 +64,21 @@ def fetch_and_save_from_dblp(stream_key, keyword, start_year=2022, filename="pap
     df.to_excel(full_path, index=False)
     print(f"成功保存 {len(rows)} 篇论文到: {full_path}")
 
+# step1_fetch_dblp.py 的执行逻辑建议
 if __name__ == "__main__":
-    # 使用默认路径 (会保存在当前目录下的 output/ 文件夹内)
-    fetch_and_save_from_dblp("journals/ijrr", "planning", 2022, "IJRR_Planning_2022_2025.xlsx")
+    # 定义任务列表：(Stream_Key, 简称)
+    tasks = [
+        ("journals/ijrr", "IJRR"),
+        ("journals/trob", "TRO"),
+        ("journals/jfr",  "JFR"),
+        ("conf/rss",      "RSS"),
+        ("conf/icra",     "ICRA")
+    ]
     
-    # 如果你想指定其他路径，可以这样调用：
-    # fetch_and_save_from_dblp("journals/ijrr", "planning", 2022, "test.xlsx", save_path="data/results/")
+    keyword = "planning"
+    start_year = 2022
+    
+    for stream_key, short_name in tasks:
+        filename = f"{short_name}_{keyword}_{start_year}_2025.xlsx"
+        print(f"\n--- 正在抓取 {short_name} ---")
+        fetch_and_save_from_dblp(stream_key, keyword, start_year, filename)
