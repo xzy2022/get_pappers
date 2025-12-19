@@ -1,6 +1,6 @@
 pandas
 requests
 tqdm
-openai
+openai==2.14.0
 python-dotenv
 openpyxl
