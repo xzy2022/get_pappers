@@ -1,1 +1,5 @@
 output/
+
+
+# 存储API密钥等敏感信息 --- IGNORE ---
+.env        
