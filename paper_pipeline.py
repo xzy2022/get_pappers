@@ -394,7 +394,6 @@ __all__ = [
     "SearchTarget",
     "PipelineRunConfig",
     "AIConfig",
-    "DEFAULT_SYSTEM_PROMPT",
     "fetch_from_dblp",
     "fetch_and_index_abstracts",
     "run_ai_scoring",
