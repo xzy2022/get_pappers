@@ -1,65 +1,51 @@
-# step2_fetch_abstracts.py
+# step2_fetch_abstracts.py (优化版)
 import pandas as pd
 import requests
 import time
-from tqdm import tqdm  # 用于显示进度条，如果没有请执行 pip install tqdm
+from tqdm import tqdm
 
-def get_abstract_from_ss(title):
+def get_abstract_by_id(doi, title):
     """
-    通过 Semantic Scholar API 根据标题查询摘要
+    优先用 DOI 查，没有 DOI 再用 Title 查
     """
+    # 1. 尝试使用 DOI
+    if pd.notna(doi) and doi != "":
+        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}"
+        params = {'fields': 'abstract'}
+        try:
+            res = requests.get(url, params=params, timeout=10)
+            if res.status_code == 200:
+                return res.json().get('abstract', "No abstract in SS database")
+        except:
+            pass # 失败了进入下一步标题查询
+
+    # 2. 尝试使用标题搜索
     search_url = "https://api.semanticscholar.org/graph/v1/paper/search"
-    params = {
-        'query': title,
-        'limit': 1,
-        'fields': 'title,abstract'
-    }
-    
+    params = {'query': title, 'limit': 1, 'fields': 'abstract'}
     try:
-        response = requests.get(search_url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
+        res = requests.get(search_url, params=params, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
             if data.get('total', 0) > 0:
-                paper_data = data['data'][0]
-                return paper_data.get('abstract', "No abstract found.")
-        elif response.status_code == 429:
-            print("\n触发 API 频率限制，等待中...")
-            time.sleep(1.5) # 遇到限制等待1.5秒
-        return "Not Found"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def update_excel_with_abstracts(input_file, output_file):
-    # 1. 读取 Excel
-    print(f"正在读取 {input_file}...")
-    df = pd.read_excel(input_file)
-
-    # 如果已经有 Abstract 列，可以跳过已有的，或者全部重写
-    if 'Abstract' not in df.columns:
-        df['Abstract'] = ""
-
-    print("开始从 Semantic Scholar 获取摘要 (这可能需要几分钟)...")
+                return data['data'][0].get('abstract', "No abstract found")
+    except:
+        pass
     
-    # 2. 遍历每一行获取摘要
-    # tqdm 可以在终端显示进度条
-    for index, row in tqdm(df.iterrows(), total=df.shape[0]):
-        # 如果摘要列已经有内容，则跳过（可选）
-        if pd.notna(row['Abstract']) and row['Abstract'] != "" and row['Abstract'] != "Not Found":
-            continue
-            
-        title = row['Title']
-        abstract = get_abstract_from_ss(title)
-        df.at[index, 'Abstract'] = abstract
-        
-        # 为了遵守 API 限制，每次请求后稍微停顿
-        time.sleep(1.1) 
+    return "Not Found"
 
-    # 3. 保存结果
+def update_excel(input_file, output_file):
+    df = pd.read_excel(input_file)
+    if 'Abstract' not in df.columns: df['Abstract'] = ""
+
+    for index, row in tqdm(df.iterrows(), total=df.shape[0]):
+        if pd.isna(row['Abstract']) or row['Abstract'] == "" or row['Abstract'] == "Not Found":
+            # 传入 DOI 和 Title
+            abstract = get_abstract_by_id(row.get('DOI'), row['Title'])
+            df.at[index, 'Abstract'] = abstract
+            time.sleep(1.2) # 严格遵守频率限制
+
     df.to_excel(output_file, index=False)
-    print(f"\n处理完成！结果已保存至 {output_file}")
+    print("更新完成")
 
 if __name__ == "__main__":
-    INPUT_FILE = "IJRR_Planning_2022_2025.xlsx"
-    OUTPUT_FILE = "IJRR_Planning_with_Abstracts.xlsx"
-    
-    update_excel_with_abstracts(INPUT_FILE, OUTPUT_FILE)
+    update_excel("output/IJRR_Planning_2022_2025.xlsx", "IJRR_Final_Results.xlsx")
