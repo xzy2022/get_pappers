@@ -75,10 +75,10 @@ if __name__ == "__main__":
         ("conf/icra",     "ICRA")
     ]
     
-    keyword = "planning"
+    keyword = "planning|semantic segmentation|traversability"
     start_year = 2022
     
     for stream_key, short_name in tasks:
-        filename = f"{short_name}_{keyword}_{start_year}_2025.xlsx"
+        filename = f"{short_name}_test_{start_year}_2025.xlsx"
         print(f"\n--- 正在抓取 {short_name} ---")
         fetch_and_save_from_dblp(stream_key, keyword, start_year, filename)
