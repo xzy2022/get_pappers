@@ -2,14 +2,14 @@ import os
 import json
 import pandas as pd
 import time
+import concurrent.futures
 from tqdm import tqdm
-from openai import OpenAI  # --- 修改：引入 OpenAI 库替代 google.genai ---
+from openai import OpenAI
 from dotenv import load_dotenv
 
-# --- 加载隐藏的 API Key ---
+# --- 加载配置 ---
 load_dotenv()
-# --- 修改：获取 DeepSeek 的 API Key ---
-api_key = os.getenv("DEEPSEEK_API_KEY") 
+api_key = os.getenv("DEEPSEEK_API_KEY")
 
 if not api_key:
     raise ValueError("错误：未在 .env 文件或环境变量中找到 DEEPSEEK_API_KEY")
@@ -27,6 +27,10 @@ MODEL_ID = "deepseek-chat" # --- 修改：使用 deepseek-chat 模型 ---
 INPUT_INDEX_FILE = "output/IJRR_Indexed_Main.xlsx"
 OUTPUT_ANALYSIS_FILE = "output/Literature_Review_Results.xlsx"
 ABSTRACT_DIR = "output/abstracts/"
+
+# --- 并行配置 ---
+MAX_WORKERS = 5  # 并发线程数。建议设为 5-10，过高可能会频繁触发 429 错误
+BATCH_SIZE = 5   # 每次发给 AI 的论文数量
 
 SYSTEM_PROMPT = """
 你是一个非结构化环境（Unstructured Environments）自动驾驶与机器人导航领域的资深审稿人。
@@ -48,95 +52,127 @@ def get_abstract_content(link):
     """从本地 JSON 读取摘要内容"""
     if pd.isna(link) or link == "Not_Found":
         return "无摘要数据。"
-    
     path = os.path.join(ABSTRACT_DIR, link)
     if os.path.exists(path):
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data.get('abstract', "摘要内容为空。")
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('abstract', "摘要内容为空。")
+        except:
+            return "摘要文件损坏。"
     return "找不到摘要文件。"
 
-def analyze_batch(batch_data):
-    """调用 DeepSeek 分析 5 篇论文"""
-    user_prompt = "请分析以下 5 篇文献的摘要，并返回 JSON 数组：\n\n"
-    for i, item in enumerate(batch_data):
-        user_prompt += f"[文献 {i+1}]\n标题: {item['Title']}\n摘要: {item['Abstract']}\n\n"
-
+def call_ai_api(prompt):
+    """单纯的 API 调用函数，包含重试逻辑"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # --- 修改：使用 OpenAI 兼容格式调用 DeepSeek ---
             response = client.chat.completions.create(
                 model=MODEL_ID,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": prompt},
                 ],
-                temperature=0.1, # 保持低温度以稳定格式
-                stream=False
+                temperature=0.1,
+                stream=False,
+                timeout=60 # 设置超时防止卡死
             )
-            
-            # --- 修改：解析 OpenAI 格式的返回内容 ---
             raw_text = response.choices[0].message.content.strip()
-            
-            # 清理 Markdown 标记 (DeepSeek 经常会加 ```json)
             cleaned_text = raw_text.replace("```json", "").replace("```", "").strip()
             return json.loads(cleaned_text)
-            
         except Exception as e:
-            # 检查是否为频率限制错误
             if "429" in str(e) or "rate limit" in str(e).lower():
                 if attempt < max_retries - 1:
-                    print(f"\n[重试控制] 触发频率限制，等待 10 秒后进行第 {attempt + 1} 次重试...")
-                    time.sleep(10) # DeepSeek 恢复较快，通常不需要太久
+                    time.sleep(5 * (attempt + 1)) # 递增等待：5s, 10s...
                     continue
-            
-            print(f"AI 分析出错: {e}")
-            return [{"score": 0, "reason": "分析失败"}] * len(batch_data)
+            # 其他错误或重试耗尽
+            print(f"\n[Error] API 调用失败: {e}")
+            return None
+    return None
 
-def run_analysis():
-    # 1. 读取索引表
+def process_batch_task(batch_df_slice):
+    """
+    线程工作函数：处理一个批次的数据
+    输入: DataFrame 切片
+    输出: 包含 (index, score, reason) 的结果列表
+    """
+    # 1. 准备 Prompt
+    batch_list = []
+    indices = [] # 记录原始索引，确保数据能对齐回去
+    
+    user_prompt = "请分析以下文献摘要，并返回 JSON 数组：\n\n"
+    
+    for i, (idx, row) in enumerate(batch_df_slice.iterrows()):
+        abstract = get_abstract_content(row['Abstract_Link'])
+        user_prompt += f"[文献 {i+1}]\n标题: {row['Title']}\n摘要: {abstract}\n\n"
+        indices.append(idx)
+
+    # 2. 调用 AI
+    ai_results = call_ai_api(user_prompt)
+
+    # 3. 整理结果
+    processed_results = []
+    
+    if ai_results and isinstance(ai_results, list):
+        for j, idx in enumerate(indices):
+            if j < len(ai_results):
+                processed_results.append({
+                    "index": idx,
+                    "score": ai_results[j].get('score', 0),
+                    "reason": ai_results[j].get('reason', "无理由")
+                })
+            else:
+                processed_results.append({"index": idx, "score": 0, "reason": "AI返回数量不足"})
+    else:
+        # 如果 API 彻底失败，填入默认值
+        for idx in indices:
+            processed_results.append({"index": idx, "score": 0, "reason": "API请求失败"})
+
+    return processed_results
+
+def run_analysis_parallel():
+    # 1. 读取数据
+    print("正在读取索引文件...")
     df = pd.read_excel(INPUT_INDEX_FILE)
     
-    all_scores = []
-    all_reasons = []
+    # 2. 切分批次
+    # 将 DataFrame 切分成多个小的 DataFrame，每块包含 BATCH_SIZE 行
+    chunks = [df.iloc[i:i + BATCH_SIZE] for i in range(0, len(df), BATCH_SIZE)]
     
-    # 2. 分组处理 (每 5 篇一组)
-    batch_size = 5
-    for i in tqdm(range(0, len(df), batch_size), desc="AI 正在评审"):
-        batch_df = df.iloc[i : i + batch_size]
-        
-        # 准备本组数据
-        batch_list = []
-        for _, row in batch_df.iterrows():
-            batch_list.append({
-                "Title": row['Title'],
-                "Abstract": get_abstract_content(row['Abstract_Link'])
-            })
-        
-        # 调用 AI
-        results = analyze_batch(batch_list)
-        
-        # 提取结果
-        for j in range(len(batch_list)):
-            if j < len(results):
-                all_scores.append(results[j].get('score', 0))
-                all_reasons.append(results[j].get('reason', "无理由"))
-            else:
-                all_scores.append(0)
-                all_reasons.append("AI 未能返回结果")
-        
-        # --- 修改：DeepSeek 速率限制较宽松，但仍保留少量缓冲 ---
-        time.sleep(1) 
+    results_map = {} # 用于存储结果：{index: {'score': x, 'reason': y}}
 
-    # 3. 将结果合并并保存
-    df['AI_Score'] = all_scores
-    df['AI_Reason'] = all_reasons
+    print(f"开始并行处理，共 {len(chunks)} 个批次，并发数: {MAX_WORKERS}")
+
+    # 3. 并行执行
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # 提交所有任务
+        futures = {executor.submit(process_batch_task, chunk): chunk for chunk in chunks}
+        
+        # 使用 tqdm 显示进度
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(chunks), desc="AI 评审进度"):
+            try:
+                batch_results = future.result()
+                # 将结果存入字典
+                for res in batch_results:
+                    results_map[res['index']] = {
+                        'score': res['score'],
+                        'reason': res['reason']
+                    }
+            except Exception as e:
+                print(f"批次处理发生异常: {e}")
+
+    # 4. 汇总数据 (线程安全地写回)
+    print("正在汇总数据...")
     
+    # 利用 map 函数根据 index 快速填入数据
+    # 如果某个 index 缺失（理论上不应该），给默认值
+    df['AI_Score'] = df.index.map(lambda x: results_map.get(x, {}).get('score', 0))
+    df['AI_Reason'] = df.index.map(lambda x: results_map.get(x, {}).get('reason', "处理遗漏"))
+
+    # 5. 排序与保存
     df = df.sort_values(by='AI_Score', ascending=False)
-    
     df.to_excel(OUTPUT_ANALYSIS_FILE, index=False)
-    print(f"\n分析完成！结果已保存至: {OUTPUT_ANALYSIS_FILE}")
+    print(f"\n并行分析完成！结果已保存至: {OUTPUT_ANALYSIS_FILE}")
 
 if __name__ == "__main__":
-    run_analysis()
+    run_analysis_parallel()
