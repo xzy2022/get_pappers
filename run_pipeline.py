@@ -10,60 +10,91 @@ from paper_pipeline import (
 )
 
 # 根据任务调整系统提示词
-DEFAULT_SYSTEM_PROMPT= """
-你是一个非结构化环境（Unstructured Environments）自动驾驶与机器人导航领域的资深审稿人。
-你的任务是阅读论文摘要，评估其对“非结构化道路/越野环境”下的规划、感知与可通行性研究的参考价值。
+# -----------------------------------------------------------------------------
+# 1. 更新后的 System Prompt (放在 build_configs 之前)
+# -----------------------------------------------------------------------------
+
+DEFAULT_SYSTEM_PROMPT = """
+你是一个针对“机器人环境感知与不确定性建图”领域的资深审稿人。
+你的任务是评估论文摘要，判断其对于综述“非结构化环境下的不确定性语义建图（Uncertainty-aware Semantic Mapping）”的参考价值。
+
+该综述关注如何利用贝叶斯推断（Bayesian Inference）、证据理论（Dempster-Shafer Theory）或深度学习不确定性（Evidential Deep Learning）来解决越野环境中的感知噪声问题。
 
 评分标准 (1-5分)：
 
-* 5分 (必读)：核心场景是非结构化/越野环境（如矿山、农田、森林、行星、废墟等）。主题涉及以下之一：
-  1. 路径/运动规划（考虑动力学、地形约束或不确定性）。
-  2. 针对复杂地形的语义分割（识别草地、泥地、岩石、植被等）。
-  3. 可通行性分析（Traversability Analysis，基于几何或语义的地形评估）。
+* 5分 (必读 - 核心对标)：
+  文章必须同时涉及以下两点：
+  1. **方法论**：明确使用了“贝叶斯核推断(BKI)”、“证据理论(DST/D-S)”、“高斯过程(GP)”或“不确定性量化(Uncertainty Quantification)”进行地图构建。
+  2. **任务**：是关于“语义建图(Semantic Mapping)”或“占据栅格地图(Occupancy Grid)”，而不仅仅是图像分割。
+  (例如：类似 "Evidential Semantic Mapping", "Bayesian Spatial Kernel Smoothing" 的文章)。
 
-* 4分 (推荐)：针对非结构化环境的通用技术，或场景为半结构化（如乡村土路、施工区域），但方法论（如自监督地形识别、鲁棒规划算法）对越野环境有极强的迁移价值。
+* 4分 (推荐 - 高度相关)：
+  场景可能是通用环境，但技术极具参考价值。
+  例如：提出了一种新的“Evidential Deep Learning”损失函数，或者一种高效的“3D连续语义建图”方法（如 ConvBKI, S-BKI 的变体），虽然没特指越野，但方法可直接迁移。
 
-* 3分 (一般)：主题涉及规划、分割或可通行性，但场景是标准的结构化道路（城市街区、高速公路）。虽然技术相关，但未解决非结构化环境的特有挑战（如滑移、地形起伏、无车道线）。
+* 3分 (一般 - 上下游文献)：
+  针对非结构化环境（Off-road）的单纯“语义分割”网络（无建图融合），或者假设地图完美的“路径规划”算法。
+  它们是建图的输入或输出，但不是建图本身。
 
-* 2分 (弱相关)：仅宽泛地提及自动驾驶或通用计算机视觉。重点在于交通流预测、V2X、或城市道路专用数据集（如 Cityscapes），对非结构化环境参考意义较小。
+* 2分 (弱相关)：
+  泛泛的SLAM（仅关注定位Pose estimation），或者通用的自动驾驶数据集介绍，未深入讨论不确定性建模。
 
-* 1分 (无关)：与规划、分割、可通行性或移动机器人导航完全无关。
+* 1分 (无关)：
+  与移动机器人感知、建图、决策完全无关的内容（如人脸识别、纯文本大模型等）。
 
 输出要求：
-1. 仅输出一个标准的 JSON 数组格式，不要包含任何 Markdown 标记（如 ```json）或解释文字。
-2. 数组中包含的对象字段：{"id": 原始序号, "score": 整数, "reason": "20字以内中文要点"}
-3. Reason 必须指出该文属于 [规划/分割/可通行性] 中的哪一类，并简述其环境特征。
+1. 仅输出一个标准的 JSON 数组格式，不要包含任何 Markdown 标记。
+2. 数组对象格式：{"id": 原始序号, "score": 整数, "reason": "简练中文理由"}
+3. Reason 必须指出该文采用的【核心数学工具】（如贝叶斯、D-S证据、深度集成等）。
 """
 
+# -----------------------------------------------------------------------------
+# 2. 更新后的 build_configs 函数
+# -----------------------------------------------------------------------------
 
 def build_configs():
-    # 根据需要修改这些配置
-    # dblp 抓取的期刊/会议列表，根据需要修改
+    # 增加 CVPR, IROS, NeurIPS 以覆盖感知前端和理论基础
     targets = [
         SearchTarget("journals/ijrr", "IJRR"),
         SearchTarget("journals/trob", "TRO"),
-        SearchTarget("journals/jfr", "JFR"),
-        SearchTarget("conf/rss", "RSS"),
+        SearchTarget("journals/jfr", "JFR"),       # 越野/野外机器人核心期刊
+        SearchTarget("journals/ral", "RA-L"),      # 机器人快报，很多建图新文章
         SearchTarget("conf/icra", "ICRA"),
+        SearchTarget("conf/iros", "IROS"),         # 补充 IROS
+        SearchTarget("conf/rss", "RSS"),
+        SearchTarget("conf/cvpr", "CVPR"),         # 视觉顶会（语义分割/不确定性）
+        SearchTarget("conf/neurips", "NeurIPS"),   # AI顶会（贝叶斯/证据深度学习理论）
     ]
 
     run_cfg = PipelineRunConfig(
-        run_name="offroad_planning",
-        # 下面列表中的关键词是或的关系。
-        keywords=["planning", "segmentation", "traversability"],     
+        run_name="evidential_mapping_survey", # 修改运行名称以区分
+        # 关键词组合：包含建图、不确定性、核心算法名词
+        keywords=[
+            "semantic mapping",           # 核心任务
+            "uncertainty quantification", # 核心难点
+            "Bayesian kernel inference",  # 核心算法 (BKI)
+            "evidential deep learning",   # 核心算法 (EDL)
+            "Dempster-Shafer",            # 核心理论 (DST)
+            "off-road traversability",    # 应用场景
+            "continuous occupancy map",   # 地图表达形式
+            "evidential fusion"           # 融合策略
+        ],     
         targets=targets,
-        start_year=2022,
+        start_year=2022, # 建议从2022开始，因为EDL在建图的应用比较新
         output_dir="output",
     )
 
     ai_cfg = AIConfig(
         system_prompt=DEFAULT_SYSTEM_PROMPT,
-        model="deepseek-chat",  # 可改 deepseek-reasoner 等
+        model="deepseek-chat", 
         base_url="https://api.deepseek.com",
         batch_size=5,
         max_workers=5,
     )
     return run_cfg, ai_cfg
+
+
+
 
 
 def main():
