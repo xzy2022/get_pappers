@@ -41,6 +41,7 @@ class PipelineRunConfig:
     output_dir: str = "output"
     abstract_dir_name: str = "abstracts"
     dblp_limit: int = 1000
+    dblp_sleep: float = 0.5
     abstract_sleep: float = 1.2
     resume: bool = True  # 允许复用已有中间结果
 
@@ -126,12 +127,18 @@ def fetch_from_dblp(cfg: PipelineRunConfig) -> Tuple[pd.DataFrame, str]:
         return df_cached, search_path
 
     all_rows = []
+    print(f"[Step1] 开始 DBLP 搜索，请求间隔设置: {cfg.dblp_sleep}s") # 提示信息
+
     for keyword in cfg.keywords:
         for target in cfg.targets:
             rows = fetch_dblp_once(target.stream_key, keyword, cfg.start_year, cfg.dblp_limit)
             for row in rows:
                 row.update({"Keyword": keyword, "Source": target.name})
             all_rows.extend(rows)
+            # 【新增】每次请求后休息一下，防止被封
+            if cfg.dblp_sleep > 0:
+                time.sleep(cfg.dblp_sleep)
+                print(f"[DBLP] 已请求: 关键词 '{keyword}' 在 '{target.name}'，获取 {len(rows)} 条记录，休息 {cfg.dblp_sleep}s")
 
     if not all_rows:
         raise RuntimeError("DBLP 未找到符合条件的论文")
