@@ -103,6 +103,7 @@ def build_configs():
         targets=targets,
         start_year=2022, # 建议从2022开始，因为EDL在建图的应用比较新
         output_dir="output",
+        dblp_sleep=1.0,  # 搜索关键词和期刊会议范围都大时，适当增大间隔以防封禁
     )
 
     ai_cfg = AIConfig(

@@ -19,7 +19,9 @@ pip install -r requirements.txt
 DEEPSEEK_API_KEY=你的key
 ```
 
-（默认使用 DeepSeek 的 `deepseek-chat`，可在 `run_pipeline.py` 中修改模型/提示词）
+（默认使用 DeepSeek 的 `deepseek-chat`，可在 `run_pipeline.py` 中修改模型/提示词）。
+
+注意，Deepseek的API只在Step3中使用，因此未配置API也可以顺利执行前2步。
 
 3) 运行全流程
 
@@ -47,6 +49,7 @@ python run_pipeline.py
 - 模型与 API：`run_pipeline.py` → `AIConfig` 构造处，改 `model`、`base_url`；`paper_pipeline.py` 中 `AIConfig.api_key_env` 控制 API Key 环境变量名（默认 `DEEPSEEK_API_KEY`）。
 - AI 分析提示词：`run_pipeline.py` → `DEFAULT_SYSTEM_PROMPT`。
 - 速率与并发：`run_pipeline.py` → `AIConfig.batch_size`、`AIConfig.max_workers` 控制评分并发；`PipelineRunConfig` 的 `abstract_sleep` 控制摘要抓取节奏；`dblp_limit` 控制单次 DBLP 拉取上限。
+- ` dblp_sleep`请求访问速度： `run_pipeline.py ` →` build_configs()`中的 `dblp_sleep`控制Step1的搜索间隔。当关键词列表、期刊会议列表都比较大时，需要相应调大该参数才不会导致请求受限。
 
 ## 断点续跑
 
