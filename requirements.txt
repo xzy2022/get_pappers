@@ -4,3 +4,5 @@ tqdm
 openai==2.14.0
 python-dotenv
 openpyxl
+selenium>=4.0.0
+webdriver-manager>=3.8.0
