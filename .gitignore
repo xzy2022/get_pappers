@@ -1,5 +1,8 @@
 output/
 
+# 存储单篇文章的json数据
+papers/  
+
 *.pyc
 
 # 存储API密钥等敏感信息 --- IGNORE ---
